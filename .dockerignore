@@ -1,0 +1,11 @@
+.git
+.github
+.golangci.yml
+.tmp
+bin/
+dist/
+docs/
+*.md
+LICENSE
+docker-compose.yml
+config.yml

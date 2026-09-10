@@ -1,0 +1,73 @@
+# Applied to every target that does not set its own interval or timeout.
+defaults:
+  interval: 10s
+  timeout: 5s
+
+targets:
+  # ICMP echo over an unprivileged ping socket, one request per interval.
+  - name: cloudflare
+    type: icmp
+    host: 1.1.1.1
+    interval: 1s
+    timeout: 1s
+
+  # Names are resolved on every probe; ip_version pins the address family.
+  - name: cloudflare-v6
+    type: icmp
+    host: one.one.one.one
+    ip_version: 6
+
+  # Full HTTP request on a fresh connection, with per-phase timings.
+  - name: example-https
+    type: http
+    url: https://example.com/
+
+  # Accept a self-signed certificate and only a 200 response.
+  - name: grafana
+    type: http
+    url: https://grafana.lan/api/health
+    tls_skip_verify: true
+    valid_status_codes: [200]
+
+  # Custom method, body and headers; redirects are only followed when asked.
+  - name: api-post
+    type: http
+    url: https://api.example.com/ping
+    method: POST
+    body: '{"ping":true}'
+    headers:
+      Content-Type: application/json
+    follow_redirects: true
+
+  # DNS query sent straight to a resolver over UDP, port 53 by default.
+  - name: quad9
+    type: dns
+    server: 9.9.9.9
+    query: example.com
+
+  # Same over TCP for an AAAA record.
+  - name: pihole-tcp
+    type: dns
+    server: 192.168.1.2:53
+    query: example.com
+    record_type: AAAA
+    transport: tcp
+
+  # Non-recursive query where NXDOMAIN counts as a success.
+  - name: authoritative-nx
+    type: dns
+    server: ns1.example.com
+    query: does-not-exist.example.com
+    recursion: false
+    valid_rcodes: [NXDOMAIN]
+
+  # Plain TCP connect time.
+  - name: nas-ssh
+    type: tcp
+    address: 192.168.1.10:22
+
+  # TCP connect plus TLS handshake.
+  - name: mail-tls
+    type: tcp
+    address: mail.example.com:993
+    tls: true

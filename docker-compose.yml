@@ -1,0 +1,13 @@
+services:
+  latency_exporter:
+    image: ghcr.io/xsaveopt/latency_exporter:latest
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "9428:9428"
+    volumes:
+      - ./config.yml:/config/config.yml:ro

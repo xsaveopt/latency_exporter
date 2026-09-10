@@ -1,0 +1,5 @@
+/latency_exporter
+/bin/
+/dist/
+/config.yml
+*.out
