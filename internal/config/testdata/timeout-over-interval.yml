@@ -1,0 +1,6 @@
+targets:
+  - name: slow
+    type: icmp
+    host: 192.0.2.1
+    interval: 1s
+    timeout: 5s

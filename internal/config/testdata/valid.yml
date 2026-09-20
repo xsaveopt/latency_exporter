@@ -1,0 +1,38 @@
+defaults:
+  interval: 30s
+  timeout: 3s
+
+targets:
+  - name: "  gateway  "
+    type: ICMP
+    host: 192.0.2.1
+    payload_size: 64
+
+  - name: site
+    type: http
+    url: https://example.invalid/
+    method: post
+    body: '{"ping":true}'
+    headers:
+      Content-Type: application/json
+    valid_status_codes: [200, 204]
+    follow_redirects: true
+
+  - name: resolver
+    type: dns
+    server: 192.0.2.53
+    query: example.invalid
+    record_type: AAAA
+    transport: tcp
+    valid_rcodes: [NOERROR, NXDOMAIN]
+    recursion: false
+    interval: 1m
+
+  - name: broker
+    type: tcp
+    address: 192.0.2.10:8883
+    tls: true
+    tls_server_name: broker.example.invalid
+    tls_skip_verify: true
+    timeout: 1s
+    ip_version: 6

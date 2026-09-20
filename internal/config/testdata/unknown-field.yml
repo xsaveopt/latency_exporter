@@ -1,0 +1,5 @@
+targets:
+  - name: typo
+    type: icmp
+    host: 192.0.2.1
+    payload_sizes: 64

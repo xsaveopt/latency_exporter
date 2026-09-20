@@ -1,0 +1,6 @@
+defaults:
+  interval: -1s
+targets:
+  - name: any
+    type: icmp
+    host: 192.0.2.1
