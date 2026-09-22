@@ -21,4 +21,6 @@ COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 ENV LATENCY_EXPORTER_CONFIG=/config/config.yml
 EXPOSE 9428
 USER 10001:10001
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD ["sh", "-c", "p=\"${LATENCY_EXPORTER_ADDR:-:9428}\"; wget -q -O /dev/null \"http://127.0.0.1:${p##*:}/health\" || exit 1"]
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

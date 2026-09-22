@@ -18,16 +18,17 @@ type Target struct {
 	Prober   probe.Prober
 }
 
-func Run(ctx context.Context, logger *slog.Logger, m *Metrics, targets []Target) {
+func Run(ctx context.Context, logger *slog.Logger, m *Metrics, h *Health, targets []Target) {
 	var wg sync.WaitGroup
 	for _, t := range targets {
 		m.register(t.Name, t.Type)
-		wg.Go(func() { loop(ctx, logger.With("target", t.Name, "type", t.Type), m, t) })
+		h.register(t.Name, t.Interval, time.Now())
+		wg.Go(func() { loop(ctx, logger.With("target", t.Name, "type", t.Type), m, h, t) })
 	}
 	wg.Wait()
 }
 
-func loop(ctx context.Context, logger *slog.Logger, m *Metrics, t Target) {
+func loop(ctx context.Context, logger *slog.Logger, m *Metrics, h *Health, t Target) {
 	jitter := time.NewTimer(rand.N(t.Interval))
 	select {
 	case <-ctx.Done():
@@ -46,7 +47,9 @@ func loop(ctx context.Context, logger *slog.Logger, m *Metrics, t Target) {
 		if ctx.Err() != nil {
 			return
 		}
-		m.observe(t.Name, t.Type, r, time.Now())
+		now := time.Now()
+		m.observe(t.Name, t.Type, r, now)
+		h.report(t.Name, r.Err, now)
 
 		switch {
 		case r.Err != nil && healthy:

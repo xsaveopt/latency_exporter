@@ -91,6 +91,7 @@ func run() error {
 	buildInfo.WithLabelValues(version, runtime.Version()).Set(1)
 	reg.MustRegister(buildInfo)
 	metrics := exporter.NewMetrics(reg)
+	health := exporter.NewHealth()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -100,6 +101,15 @@ func run() error {
 		EnableOpenMetrics: true,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if health.Degraded(time.Now()) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprint(w, "degraded")
+			return
+		}
+		_, _ = fmt.Fprint(w, "up")
+	})
 	if *metricsPath != "/" {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/" {
@@ -126,7 +136,7 @@ func run() error {
 
 	done := make(chan struct{})
 	go func() {
-		exporter.Run(ctx, logger, metrics, targets)
+		exporter.Run(ctx, logger, metrics, health, targets)
 		close(done)
 	}()
 
