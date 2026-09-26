@@ -118,7 +118,7 @@ func run() error {
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			path := html.EscapeString(*metricsPath)
-			_, _ = fmt.Fprintf(w, "<html><head><title>latency_exporter</title></head><body><h1>latency_exporter</h1><p><a href=%q>%s</a></p></body></html>\n", path, path)
+			_, _ = fmt.Fprintf(w, "<html><head><title>latency_exporter</title></head><body><h1>latency_exporter</h1><p><a href=\"%s\">%s</a></p></body></html>\n", path, path)
 		})
 	}
 	srv := &http.Server{
