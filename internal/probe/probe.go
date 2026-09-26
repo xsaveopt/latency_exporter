@@ -143,7 +143,7 @@ func resolve(ctx context.Context, host string, ipVersion int) (netip.Addr, error
 	addrs, err := net.DefaultResolver.LookupNetIP(ctx, lookupNetwork(ipVersion), host)
 	if err != nil {
 		if ctx.Err() != nil {
-			return netip.Addr{}, err
+			return netip.Addr{}, &Error{Reason: ReasonTimeout, Err: err}
 		}
 		return netip.Addr{}, &Error{Reason: ReasonResolve, Err: err}
 	}
