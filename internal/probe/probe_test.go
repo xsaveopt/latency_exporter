@@ -10,6 +10,7 @@ import (
 	"os"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/xsaveopt/latency_exporter/internal/config"
 )
@@ -213,5 +214,30 @@ func TestResolve(t *testing.T) {
 	var pe *Error
 	if !errors.As(err, &pe) {
 		t.Errorf("resolve(bad..host) error = %T, want it tagged as a probe error", err)
+	}
+}
+
+func TestResolveContextExpiryIsTimeout(t *testing.T) {
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"deadline passed", expired},
+		{"cancelled", cancelled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := resolve(tc.ctx, "latency-exporter.invalid", 0)
+			if err == nil {
+				t.Fatal("resolve() succeeded on an expired context")
+			}
+			if got := Reason(err); got != ReasonTimeout {
+				t.Errorf("Reason() = %q (%v), want %q when the probe context ran out during name resolution", got, err, ReasonTimeout)
+			}
+		})
 	}
 }

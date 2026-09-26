@@ -381,3 +381,74 @@ func TestHTTPProbeResolvePhase(t *testing.T) {
 		t.Errorf("phases = %v, want no resolve phase for an ip literal url", phaseNames(direct.Phases))
 	}
 }
+
+func TestHTTPProbeCustomHeaders(t *testing.T) {
+	got := make(chan http.Header, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+	}))
+	defer srv.Close()
+
+	p := newHTTPProber(t, config.Target{
+		URL: srv.URL,
+		Headers: map[string]string{
+			"content-type":  "application/json",
+			"X-Probe-Token": "abc123",
+			"Accept":        "text/plain",
+		},
+	})
+	for i := range 2 {
+		if res := p.Probe(context.Background()); res.Err != nil {
+			t.Fatalf("probe %d: %v", i, res.Err)
+		}
+		h := <-got
+		for key, want := range map[string]string{
+			"Content-Type":  "application/json",
+			"X-Probe-Token": "abc123",
+			"Accept":        "text/plain",
+			"User-Agent":    "latency_exporter",
+		} {
+			if v := h.Get(key); v != want {
+				t.Errorf("probe %d: server saw %s = %q, want %q", i, key, v, want)
+			}
+		}
+		if vs := h.Values("X-Probe-Token"); len(vs) != 1 {
+			t.Errorf("probe %d: X-Probe-Token sent %d times, want once", i, len(vs))
+		}
+	}
+}
+
+func TestHTTPProbeIPVersion6(t *testing.T) {
+	v4 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer v4.Close()
+
+	res := newHTTPProber(t, config.Target{URL: v4.URL, IPVersion: 6}).Probe(context.Background())
+	if res.Err == nil {
+		t.Fatal("Probe() reached an IPv4 server while pinned to ip_version 6")
+	}
+	if res.StatusCode != 0 {
+		t.Errorf("StatusCode = %d, want 0 without a response", res.StatusCode)
+	}
+
+	ln, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback is not available here: %v", err)
+	}
+	v6 := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	_ = v6.Listener.Close()
+	v6.Listener = ln
+	v6.Start()
+	defer v6.Close()
+
+	ok := newHTTPProber(t, config.Target{URL: v6.URL, IPVersion: 6}).Probe(context.Background())
+	if ok.Err != nil {
+		t.Fatalf("Probe(%s) error = %v", v6.URL, ok.Err)
+	}
+	if ok.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want 200", ok.StatusCode)
+	}
+}

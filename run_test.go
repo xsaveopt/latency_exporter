@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -350,4 +351,82 @@ func TestRunHealthDegradedWhenEveryTargetFails(t *testing.T) {
 	}
 
 	stopRun(t, result)
+}
+
+func TestRunIndexEscapesTelemetryPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{"html special characters", `/a"b<c>&d`, `<a href="/a&#34;b&lt;c&gt;&amp;d">/a&#34;b&lt;c&gt;&amp;d</a>`},
+		{"backslash kept as is", `/a\b`, `<a href="/a\b">/a\b</a>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, result := startRun(t,
+				"-config.file", writeConfig(t, validConfig),
+				"-web.listen-address", "127.0.0.1:0",
+				"-web.telemetry-path", tc.path,
+			)
+			code, _, body := get(t, "http://"+addr+"/")
+			stopRun(t, result)
+			if code != http.StatusOK {
+				t.Fatalf("index status = %d", code)
+			}
+			if !strings.Contains(body, tc.want) {
+				t.Errorf("index body = %q, want it to contain %q", body, tc.want)
+			}
+		})
+	}
+}
+
+func shutdownListener(t *testing.T, addr string) error {
+	t.Helper()
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for fd := 3; fd < 4096; fd++ {
+		sa, err := syscall.Getsockname(fd)
+		if err != nil {
+			continue
+		}
+		in4, ok := sa.(*syscall.SockaddrInet4)
+		if !ok || in4.Port != port {
+			continue
+		}
+		if listening, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_ACCEPTCONN); err != nil || listening != 1 {
+			continue
+		}
+		return syscall.Shutdown(fd, syscall.SHUT_RDWR)
+	}
+	return fmt.Errorf("no listening socket found for %s", addr)
+}
+
+func TestRunServerFailure(t *testing.T) {
+	addr, result := startRun(t,
+		"-config.file", writeConfig(t, validConfig),
+		"-web.listen-address", "127.0.0.1:0",
+	)
+	if code, _, _ := get(t, "http://"+addr+"/health"); code != http.StatusOK {
+		t.Fatalf("health status = %d before the failure", code)
+	}
+
+	if err := shutdownListener(t, addr); err != nil {
+		stopRun(t, result)
+		t.Skipf("this platform cannot shut down a listening socket: %v", err)
+	}
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.HasPrefix(err.Error(), "http server: ") {
+			t.Errorf("run() = %v, want an http server error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run() kept running after its listener failed")
+	}
 }

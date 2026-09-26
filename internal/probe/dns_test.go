@@ -548,3 +548,71 @@ func TestDNSProbeCancelledWhileWaiting(t *testing.T) {
 		t.Errorf("Probe() error = %v (reason %q), want the in-flight query aborted by the cancel", res.Err, Reason(res.Err))
 	}
 }
+
+func TestDNSProbeUDPIPVersion(t *testing.T) {
+	t.Run("pinned to v4", func(t *testing.T) {
+		addr, seen := serveUDPDNS(t, dnsResponse(t, 0, true, dnsmessage.RCodeSuccess))
+		p := newDNSProber(t, config.Target{Server: addr, IPVersion: 4})
+		if p.network != "udp4" {
+			t.Errorf("network = %q, want udp4", p.network)
+		}
+		if res := probeWithin(p, 5*time.Second); res.Err != nil {
+			t.Fatalf("Probe() error = %v", res.Err)
+		}
+		<-seen
+	})
+
+	t.Run("pinned to v6 against a v4 server", func(t *testing.T) {
+		addr, seen := serveUDPDNS(t, dnsResponse(t, 0, true, dnsmessage.RCodeSuccess))
+		p := newDNSProber(t, config.Target{Server: addr, IPVersion: 6})
+		if p.network != "udp6" {
+			t.Errorf("network = %q, want udp6", p.network)
+		}
+		res := probeWithin(p, 500*time.Millisecond)
+		if res.Err == nil {
+			t.Fatal("Probe() succeeded, want the v4 server rejected when pinned to v6")
+		}
+		if res.Duration != 0 {
+			t.Errorf("Duration = %s, want 0 on failure", res.Duration)
+		}
+		select {
+		case q := <-seen:
+			t.Errorf("server saw %+v, want no query sent over the wrong family", q.question)
+		default:
+		}
+	})
+}
+
+func TestDNSProbeHostnameServer(t *testing.T) {
+	for _, transport := range []string{"udp", "tcp"} {
+		t.Run(transport, func(t *testing.T) {
+			var addr string
+			var seen <-chan seenQuery
+			if transport == "udp" {
+				addr, seen = serveUDPDNS(t, dnsResponse(t, 0, true, dnsmessage.RCodeSuccess))
+			} else {
+				answer := dnsResponse(t, 0, true, dnsmessage.RCodeSuccess)
+				addr, seen = serveTCPDNS(t, func(conn net.Conn, q seenQuery) {
+					writeFramed(conn, withID(answer, q.header.ID))
+				})
+			}
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := newDNSProber(t, config.Target{Server: net.JoinHostPort("localhost", port), Transport: transport, IPVersion: 4})
+			if p.server != "localhost:"+port {
+				t.Errorf("server = %q, want the hostname kept for the dialer", p.server)
+			}
+			if res := probeWithin(p, 5*time.Second); res.Err != nil {
+				t.Fatalf("Probe() error = %v", res.Err)
+			}
+			<-seen
+		})
+	}
+
+	p := newDNSProber(t, config.Target{Server: "localhost"})
+	if p.server != "localhost:53" {
+		t.Errorf("server = %q, want the default port added to a bare hostname", p.server)
+	}
+}

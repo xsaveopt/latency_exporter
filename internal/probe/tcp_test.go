@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -175,5 +177,114 @@ func TestTCPProbeCancelledContext(t *testing.T) {
 	res := newTCPProber(t, config.Target{Address: closedAddr(t)}).Probe(ctx)
 	if Reason(res.Err) != ReasonTimeout {
 		t.Errorf("reason = %q, want %q", Reason(res.Err), ReasonTimeout)
+	}
+}
+
+func TestTCPProbeResolveTimeout(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	res := newTCPProber(t, config.Target{Address: "latency-exporter.invalid:22"}).Probe(ctx)
+	if got := Reason(res.Err); got != ReasonTimeout {
+		t.Errorf("reason = %q (%v), want %q when the deadline passes while resolving", got, res.Err, ReasonTimeout)
+	}
+}
+
+func TestTCPProbeTLSHandshakeHangTimesOut(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		<-release
+		_ = conn.Close()
+	}()
+	t.Cleanup(func() {
+		close(release)
+		_ = ln.Close()
+		<-done
+	})
+
+	res := probeWithin(newTCPProber(t, config.Target{Address: ln.Addr().String(), TLS: true, TLSSkipVerify: true}), 100*time.Millisecond)
+	if got := Reason(res.Err); got != ReasonTimeout {
+		t.Errorf("reason = %q (%v), want %q for a server that never answers the handshake", got, res.Err, ReasonTimeout)
+	}
+	if res.Duration != 0 {
+		t.Errorf("Duration = %s, want 0 when the handshake never finished", res.Duration)
+	}
+}
+
+func sniTestServer(t *testing.T) (string, <-chan string) {
+	t.Helper()
+	names := make(chan string, 1)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
+	srv.TLS = &tls.Config{
+		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			select {
+			case names <- hello.ServerName:
+			default:
+			}
+			return nil, nil
+		},
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String(), names
+}
+
+func TestTCPProbeTLSSendsServerName(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(port string) config.Target
+		want   string
+	}{
+		{
+			name: "explicit tls_server_name",
+			target: func(port string) config.Target {
+				return config.Target{Address: net.JoinHostPort("127.0.0.1", port), TLS: true, TLSSkipVerify: true, TLSServerName: "probe.example.invalid"}
+			},
+			want: "probe.example.invalid",
+		},
+		{
+			name: "hostname from the address",
+			target: func(port string) config.Target {
+				return config.Target{Address: net.JoinHostPort("localhost", port), TLS: true, TLSSkipVerify: true, IPVersion: 4}
+			},
+			want: "localhost",
+		},
+		{
+			name: "no sni for an ip literal",
+			target: func(port string) config.Target {
+				return config.Target{Address: net.JoinHostPort("127.0.0.1", port), TLS: true, TLSSkipVerify: true}
+			},
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, names := sniTestServer(t)
+			_, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := probeWithin(newTCPProber(t, tc.target(port)), 5*time.Second)
+			if res.Err != nil {
+				t.Fatalf("Probe() error = %v", res.Err)
+			}
+			select {
+			case got := <-names:
+				if got != tc.want {
+					t.Errorf("server saw SNI %q, want %q", got, tc.want)
+				}
+			default:
+				t.Fatal("server never saw a ClientHello")
+			}
+		})
 	}
 }
