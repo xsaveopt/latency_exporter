@@ -322,3 +322,32 @@ func TestRunMetricsAtRoot(t *testing.T) {
 
 	stopRun(t, result)
 }
+
+func TestRunHealthDegradedWhenEveryTargetFails(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ln.Addr().String()
+	_ = ln.Close()
+
+	addr, result := startRun(t,
+		"-config.file", writeConfig(t, fmt.Sprintf("targets:\n  - name: down\n    type: tcp\n    address: %s\n    interval: 50ms\n", closed)),
+		"-web.listen-address", "127.0.0.1:0",
+	)
+
+	var code int
+	var ctype, body string
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		code, ctype, body = get(t, "http://"+addr+"/health")
+		if code == http.StatusServiceUnavailable || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if code != http.StatusServiceUnavailable || body != "degraded" || ctype != "text/plain; charset=utf-8" {
+		t.Errorf("health = %d %q %q, want 503 degraded once the only target fails", code, ctype, body)
+	}
+
+	stopRun(t, result)
+}

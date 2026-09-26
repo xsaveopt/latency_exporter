@@ -266,3 +266,33 @@ func TestRunWithNoTargetsReturns(t *testing.T) {
 		t.Fatal("Run with no targets did not return")
 	}
 }
+
+func TestRunStopsWhileWaitingForTheNextTick(t *testing.T) {
+	p := newScripted(probe.Result{Duration: time.Millisecond})
+	m := NewMetrics(prometheus.NewPedanticRegistry())
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		Run(ctx, slog.New(&recordingHandler{store: &logStore{}}), m, NewHealth(), []Target{{Name: "idle", Type: "tcp", Interval: time.Second, Timeout: 100 * time.Millisecond, Prober: p}})
+		close(done)
+	}()
+
+	for deadline := time.Now().Add(10 * time.Second); testutil.ToFloat64(m.probes.WithLabelValues("idle", "tcp")) < 1; {
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("first probe was never observed")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return when cancelled between ticks")
+	}
+
+	if got := p.callCount(); got != 1 {
+		t.Errorf("prober called %d times, want 1 before the next tick", got)
+	}
+}

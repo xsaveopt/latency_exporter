@@ -189,3 +189,29 @@ func TestCtxErr(t *testing.T) {
 		t.Errorf("ctxErr should wrap both the context error and %v, got %v", inner, got)
 	}
 }
+
+func TestResolve(t *testing.T) {
+	ctx := context.Background()
+
+	addr, err := resolve(ctx, "::ffff:192.0.2.7", 4)
+	if err != nil || addr.String() != "192.0.2.7" {
+		t.Errorf("resolve(mapped v4) = %v, %v, want the unmapped 192.0.2.7", addr, err)
+	}
+
+	addr, err = resolve(ctx, "localhost", 4)
+	if err != nil {
+		t.Fatalf("resolve(localhost, 4): %v", err)
+	}
+	if !addr.Is4() || !addr.IsLoopback() {
+		t.Errorf("resolve(localhost, 4) = %v, want an IPv4 loopback", addr)
+	}
+
+	_, err = resolve(ctx, "bad..host", 0)
+	if Reason(err) != ReasonResolve {
+		t.Errorf("resolve(bad..host) error = %v (reason %q), want %q", err, Reason(err), ReasonResolve)
+	}
+	var pe *Error
+	if !errors.As(err, &pe) {
+		t.Errorf("resolve(bad..host) error = %T, want it tagged as a probe error", err)
+	}
+}

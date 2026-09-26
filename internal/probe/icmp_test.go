@@ -147,3 +147,25 @@ func TestICMPProbeLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestICMPProbeLoopbackIPv6(t *testing.T) {
+	conn, err := icmp.ListenPacket("udp6", "::1")
+	if err != nil {
+		t.Skipf("unprivileged ICMPv6 sockets are not available here: %v", err)
+	}
+	_ = conn.Close()
+
+	p, err := newICMP(&config.Target{Host: "::1"})
+	if err != nil {
+		t.Fatalf("newICMP: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	r := p.Probe(ctx)
+	if r.Err != nil {
+		t.Fatalf("Probe(::1): %v", r.Err)
+	}
+	if r.Duration <= 0 {
+		t.Errorf("Duration = %s, want a positive round trip", r.Duration)
+	}
+}

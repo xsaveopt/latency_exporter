@@ -322,3 +322,62 @@ func closedAddr(t *testing.T) string {
 	}
 	return addr
 }
+
+func TestHTTPProbeInvalidMethod(t *testing.T) {
+	res := newHTTPProber(t, config.Target{URL: "http://192.0.2.1/", Method: "BAD METHOD"}).Probe(context.Background())
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "invalid method") {
+		t.Fatalf("Probe() error = %v, want an invalid method error", res.Err)
+	}
+	if Reason(res.Err) != ReasonError {
+		t.Errorf("reason = %q, want %q", Reason(res.Err), ReasonError)
+	}
+}
+
+func TestHTTPProbeTruncatedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, buf, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort")
+		_ = buf.Flush()
+		_ = conn.Close()
+	}))
+	defer srv.Close()
+
+	res := newHTTPProber(t, config.Target{URL: srv.URL}).Probe(context.Background())
+	if res.Err == nil || !strings.HasPrefix(res.Err.Error(), "read body: ") {
+		t.Fatalf("Probe() error = %v, want a read body error", res.Err)
+	}
+	if Reason(res.Err) != ReasonError {
+		t.Errorf("reason = %q, want %q", Reason(res.Err), ReasonError)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("StatusCode = %d, want the 200 that arrived before the body broke", res.StatusCode)
+	}
+}
+
+func TestHTTPProbeResolvePhase(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer srv.Close()
+	_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res := newHTTPProber(t, config.Target{URL: "http://localhost:" + port + "/", IPVersion: 4}).Probe(context.Background())
+	if res.Err != nil {
+		t.Fatalf("Probe() error = %v", res.Err)
+	}
+	if names := phaseNames(res.Phases); len(names) == 0 || names[0] != "resolve" {
+		t.Errorf("phases = %v, want resolve first for a hostname url", names)
+	}
+
+	direct := newHTTPProber(t, config.Target{URL: srv.URL}).Probe(context.Background())
+	if hasPhase(direct.Phases, "resolve") {
+		t.Errorf("phases = %v, want no resolve phase for an ip literal url", phaseNames(direct.Phases))
+	}
+}

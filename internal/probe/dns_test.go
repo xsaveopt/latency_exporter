@@ -1,8 +1,15 @@
 package probe
 
 import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"io"
+	"net"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 
@@ -238,5 +245,306 @@ func TestDNSQueryEncodesHeader(t *testing.T) {
 	}
 	if q.Name.String() != "example.invalid." || q.Type != dnsmessage.TypeA {
 		t.Errorf("question = %+v", q)
+	}
+}
+
+type seenQuery struct {
+	header   dnsmessage.Header
+	question dnsmessage.Question
+}
+
+func parseQuery(b []byte) (seenQuery, error) {
+	var parser dnsmessage.Parser
+	h, err := parser.Start(b)
+	if err != nil {
+		return seenQuery{}, err
+	}
+	q, err := parser.Question()
+	if err != nil {
+		return seenQuery{}, err
+	}
+	return seenQuery{header: h, question: q}, nil
+}
+
+func withID(msg []byte, id uint16) []byte {
+	out := append([]byte(nil), msg...)
+	binary.BigEndian.PutUint16(out, id)
+	return out
+}
+
+func dnsReplies(query seenQuery, answer []byte) [][]byte {
+	id := query.header.ID
+	return [][]byte{
+		{0xde, 0xad},
+		withID(answer, id^0xffff),
+		withID(answer, id)[:3],
+		withID(answer, id),
+	}
+}
+
+func serveUDPDNS(t *testing.T, answer []byte) (string, <-chan seenQuery) {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	seen := make(chan seenQuery, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 65535)
+		n, from, err := conn.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		q, err := parseQuery(buf[:n])
+		if err != nil {
+			t.Errorf("server could not parse the query: %v", err)
+			return
+		}
+		seen <- q
+		if answer == nil {
+			return
+		}
+		notResponse := withID(answer, q.header.ID)
+		notResponse[2] &^= 0x80
+		_, _ = conn.WriteTo(notResponse, from)
+		for _, reply := range dnsReplies(q, answer) {
+			_, _ = conn.WriteTo(reply, from)
+		}
+	}()
+	t.Cleanup(func() {
+		_ = conn.Close()
+		<-done
+	})
+	return conn.LocalAddr().String(), seen
+}
+
+func writeFramed(w io.Writer, msg []byte) {
+	var lenb [2]byte
+	binary.BigEndian.PutUint16(lenb[:], uint16(len(msg)))
+	_, _ = w.Write(append(lenb[:], msg...))
+}
+
+func serveTCPDNS(t *testing.T, respond func(net.Conn, seenQuery)) (string, <-chan seenQuery) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	seen := make(chan seenQuery, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		var lenb [2]byte
+		if _, err := io.ReadFull(conn, lenb[:]); err != nil {
+			t.Errorf("server read length: %v", err)
+			return
+		}
+		buf := make([]byte, binary.BigEndian.Uint16(lenb[:]))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Errorf("server read query: %v", err)
+			return
+		}
+		q, err := parseQuery(buf)
+		if err != nil {
+			t.Errorf("server could not parse the query: %v", err)
+			return
+		}
+		seen <- q
+		respond(conn, q)
+	}()
+	t.Cleanup(func() {
+		_ = ln.Close()
+		<-done
+	})
+	return ln.Addr().String(), seen
+}
+
+func newDNSProber(t *testing.T, target config.Target) *dnsProber {
+	t.Helper()
+	target.Type = config.TypeDNS
+	if target.Query == "" {
+		target.Query = "example.invalid"
+	}
+	p, err := newDNS(&target)
+	if err != nil {
+		t.Fatalf("newDNS: %v", err)
+	}
+	return p
+}
+
+func probeWithin(p Prober, d time.Duration) Result {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	return p.Probe(ctx)
+}
+
+func TestDNSProbeUDP(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rcode      dnsmessage.RCode
+		validCodes []string
+		wantErr    string
+	}{
+		{name: "noerror", rcode: dnsmessage.RCodeSuccess},
+		{name: "nxdomain is a failure by default", rcode: dnsmessage.RCodeNameError, wantErr: "unexpected rcode NXDOMAIN"},
+		{name: "nxdomain accepted when listed", rcode: dnsmessage.RCodeNameError, validCodes: []string{"NXDOMAIN"}},
+		{name: "noerror rejected when not listed", rcode: dnsmessage.RCodeSuccess, validCodes: []string{"SERVFAIL"}, wantErr: "unexpected rcode NOERROR"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, seen := serveUDPDNS(t, dnsResponse(t, 0, true, tc.rcode))
+			res := probeWithin(newDNSProber(t, config.Target{Server: addr, RecordType: "MX", ValidRcodes: tc.validCodes}), 5*time.Second)
+
+			q := <-seen
+			if q.question.Name.String() != "example.invalid." || q.question.Type != dnsmessage.TypeMX {
+				t.Errorf("server saw question %+v", q.question)
+			}
+			if !q.header.RecursionDesired {
+				t.Error("server saw RecursionDesired = false, want true by default")
+			}
+
+			if tc.wantErr == "" {
+				if res.Err != nil {
+					t.Fatalf("Probe() error = %v", res.Err)
+				}
+			} else {
+				if Reason(res.Err) != ReasonRcode || !strings.Contains(res.Err.Error(), tc.wantErr) {
+					t.Fatalf("Probe() error = %v (reason %q), want %q with reason %q", res.Err, Reason(res.Err), tc.wantErr, ReasonRcode)
+				}
+			}
+			if res.Duration <= 0 {
+				t.Errorf("Duration = %s, want the round trip even when the rcode is rejected", res.Duration)
+			}
+		})
+	}
+}
+
+func TestDNSProbeRecursionOff(t *testing.T) {
+	addr, seen := serveUDPDNS(t, dnsResponse(t, 0, true, dnsmessage.RCodeSuccess))
+	recursion := false
+	if res := probeWithin(newDNSProber(t, config.Target{Server: addr, Recursion: &recursion}), 5*time.Second); res.Err != nil {
+		t.Fatalf("Probe() error = %v", res.Err)
+	}
+	if q := <-seen; q.header.RecursionDesired {
+		t.Error("server saw RecursionDesired = true, want it off")
+	}
+}
+
+func TestDNSProbeUDPNoAnswerTimesOut(t *testing.T) {
+	addr, seen := serveUDPDNS(t, nil)
+	res := probeWithin(newDNSProber(t, config.Target{Server: addr}), 100*time.Millisecond)
+	<-seen
+	if Reason(res.Err) != ReasonTimeout {
+		t.Errorf("reason = %q (%v), want %q", Reason(res.Err), res.Err, ReasonTimeout)
+	}
+	if res.Duration != 0 {
+		t.Errorf("Duration = %s, want 0 without an answer", res.Duration)
+	}
+}
+
+func TestDNSProbeTCP(t *testing.T) {
+	answer := dnsResponse(t, 0, true, dnsmessage.RCodeServerFailure)
+	addr, seen := serveTCPDNS(t, func(conn net.Conn, q seenQuery) {
+		for _, reply := range dnsReplies(q, answer) {
+			writeFramed(conn, reply)
+		}
+	})
+	res := probeWithin(newDNSProber(t, config.Target{Server: addr, Transport: "tcp", RecordType: "TXT"}), 5*time.Second)
+
+	if q := <-seen; q.question.Type != dnsmessage.TypeTXT {
+		t.Errorf("server saw question %+v", q.question)
+	}
+	if Reason(res.Err) != ReasonRcode || !strings.Contains(res.Err.Error(), "unexpected rcode SERVFAIL") {
+		t.Errorf("Probe() error = %v, want the SERVFAIL answer after the stray frames", res.Err)
+	}
+	if res.Duration <= 0 {
+		t.Errorf("Duration = %s, want a positive round trip", res.Duration)
+	}
+}
+
+func TestDNSProbeTCPTruncatedAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame []byte
+	}{
+		{"cut inside the length prefix", []byte{0x00}},
+		{"cut inside the message", []byte{0x00, 0x40, 0x12, 0x34}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, seen := serveTCPDNS(t, func(conn net.Conn, _ seenQuery) {
+				_, _ = conn.Write(tc.frame)
+			})
+			res := probeWithin(newDNSProber(t, config.Target{Server: addr, Transport: "tcp"}), 5*time.Second)
+			<-seen
+			if !errors.Is(res.Err, io.ErrUnexpectedEOF) && !errors.Is(res.Err, io.EOF) {
+				t.Errorf("Probe() error = %v, want an EOF from the short frame", res.Err)
+			}
+			if Reason(res.Err) != ReasonError {
+				t.Errorf("reason = %q, want %q", Reason(res.Err), ReasonError)
+			}
+		})
+	}
+}
+
+func TestDNSProbeTCPRefused(t *testing.T) {
+	res := probeWithin(newDNSProber(t, config.Target{Server: closedAddr(t), Transport: "tcp"}), 5*time.Second)
+	if Reason(res.Err) != ReasonRefused {
+		t.Errorf("reason = %q (%v), want %q", Reason(res.Err), res.Err, ReasonRefused)
+	}
+}
+
+func TestDNSProbeCancelledContext(t *testing.T) {
+	addr, _ := serveTCPDNS(t, func(net.Conn, seenQuery) {})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res := newDNSProber(t, config.Target{Server: addr, Transport: "tcp"}).Probe(ctx)
+	if Reason(res.Err) != ReasonTimeout || !errors.Is(res.Err, context.Canceled) {
+		t.Errorf("Probe() error = %v (reason %q), want a cancelled timeout", res.Err, Reason(res.Err))
+	}
+}
+
+func TestNewDNSUsesSystemNameserver(t *testing.T) {
+	var want string
+	if b, err := os.ReadFile(resolvConf); err == nil {
+		for line := range strings.Lines(string(b)) {
+			if f := strings.Fields(line); len(f) >= 2 && f[0] == "nameserver" {
+				want = f[1]
+				break
+			}
+		}
+	}
+
+	p, err := newDNS(&config.Target{Type: config.TypeDNS, Query: "example.invalid"})
+	if want == "" {
+		if err == nil || !strings.Contains(err.Error(), "server not set and no nameserver found in "+resolvConf) {
+			t.Fatalf("newDNS() error = %v, want the missing nameserver error", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("newDNS: %v", err)
+	}
+	if wantAddr := net.JoinHostPort(strings.Trim(want, "[]"), "53"); p.server != wantAddr {
+		t.Errorf("server = %q, want %q from %s", p.server, wantAddr, resolvConf)
+	}
+}
+
+func TestDNSProbeCancelledWhileWaiting(t *testing.T) {
+	addr, seen := serveUDPDNS(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		<-seen
+		cancel()
+	}()
+	res := newDNSProber(t, config.Target{Server: addr}).Probe(ctx)
+	if Reason(res.Err) != ReasonTimeout || !errors.Is(res.Err, context.Canceled) {
+		t.Errorf("Probe() error = %v (reason %q), want the in-flight query aborted by the cancel", res.Err, Reason(res.Err))
 	}
 }
