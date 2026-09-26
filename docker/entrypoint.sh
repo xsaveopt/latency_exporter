@@ -199,7 +199,7 @@ check_config() {
 }
 
 check_ping() {
-  grep -Eq '^[[:space:]]*(-[[:space:]]*)?type:[[:space:]]*["'\'']?icmp' "$CONFIG_FILE" 2>/dev/null || return 0
+  grep -Eiq '^[[:space:]]*(-[[:space:]]*)?type:[[:space:]]*["'\'']?icmp' "$CONFIG_FILE" 2>/dev/null || return 0
   local range=/proc/sys/net/ipv4/ping_group_range lo hi
   if [ ! -r "$range" ]; then
     note "icmp: ${range} is not exposed by this kernel or sandbox; unprivileged ping sockets are decided by the runtime"
