@@ -47,7 +47,13 @@ jobs:
         run: shellcheck -S warning docker/entrypoint.sh
 
       - name: Install bats
-        run: sudo apt-get update && sudo apt-get install -y bats
+        uses: bats-core/bats-action@4.0.0
+        with:
+          bats-version: 1.14.0
+          support-install: false
+          assert-install: false
+          detik-install: false
+          file-install: false
 
       - name: Entrypoint tests
         run: bats test
